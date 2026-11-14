@@ -5,14 +5,27 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
-const PUN_CSV_URL =
-  'https://githubusercontent.com';
-
-let cacheColonnine = [];
-let ultimoAggiornamento = 0;
-const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 ore
+const LISTINO_OPERATORI = [
+  { keywords: ['tesla'], nomeUfficiale: 'Tesla Supercharger', ac: 0.55, dc: 0.65 },
+  { keywords: ['electra'], nomeUfficiale: 'Electra', ac: 0.54, dc: 0.54 },
+  { keywords: ['enel', 'enel x', 'enelx', 'q83082068'], nomeUfficiale: 'Enel X Way', ac: 0.67, dc: 0.75 },
+  { keywords: ['plenitude', 'be charge', 'becharge', 'eni', 'q105756478'], nomeUfficiale: 'Plenitude + Be Charge', ac: 0.65, dc: 0.85 },
+  { keywords: ['ewiva'], nomeUfficiale: 'Ewiva', ac: 0.75, dc: 0.80 },
+  { keywords: ['a2a'], nomeUfficiale: 'A2A E-Moving', ac: 0.65, dc: 0.90 },
+  { keywords: ['duferco'], nomeUfficiale: 'Duferco Energia', ac: 0.74, dc: 0.79 },
+  { keywords: ['electrip'], nomeUfficiale: 'Electrip', ac: 0.75, dc: 0.80 },
+  { keywords: ['ionity'], nomeUfficiale: 'Ionity', ac: 0.85, dc: 0.85 },
+  { keywords: ['atlante'], nomeUfficiale: 'Atlante', ac: 0.69, dc: 0.85 },
+  { keywords: ['free to x', 'freetox'], nomeUfficiale: 'Free To X', ac: 0.75, dc: 0.85 },
+  { keywords: ['neogy'], nomeUfficiale: 'Neogy', ac: 0.65, dc: 0.82 },
+  { keywords: ['hera'], nomeUfficiale: 'Hera Comm', ac: 0.66, dc: 0.84 },
+  { keywords: ['iren'], nomeUfficiale: 'IrenGO', ac: 0.65, dc: 0.82 },
+  { keywords: ['ace', 'acea'], nomeUfficiale: 'Acea Energia', ac: 0.65, dc: 0.83 },
+  { keywords: ['repower'], nomeUfficiale: 'Repower', ac: 0.68, dc: 0.82 },
+  { keywords: ['sorgenia'], nomeUfficiale: 'Sorgenia', ac: 0.66, dc: 0.80 },
+];
 
 function calcolaDistanzaKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
@@ -28,264 +41,187 @@ function calcolaDistanzaKm(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-function parseCSVLine(line, separator) {
-  const result = [];
-  let current = '';
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    if (char === '"') {
-      inQuotes = !inQuotes;
-    } else if (char === separator && !inQuotes) {
-      result.push(current.trim());
-      current = '';
-    } else {
-      current += char;
+function estraiPotenzaEPresa(tags) {
+  let maxKw = 0;
+  const preseTrovate = [];
+
+  for (const [key, value] of Object.entries(tags)) {
+    const k = key.toLowerCase();
+    const v = String(value).toLowerCase();
+
+    // Riconoscimento prese dai tag socket:* di OpenStreetMap
+    if (k.startsWith('socket:type2_combo') || k.includes('ccs')) {
+      if (v !== 'no' && !preseTrovate.includes('CCS Combo 2')) preseTrovate.push('CCS Combo 2');
+      if (maxKw < 50) maxKw = 50;
+    } else if (k.startsWith('socket:chademo')) {
+      if (v !== 'no' && !preseTrovate.includes('CHAdeMO')) preseTrovate.push('CHAdeMO');
+      if (maxKw < 50) maxKw = 50;
+    } else if (k === 'socket:type2' || k.startsWith('socket:type2:')) {
+      if (v !== 'no' && !preseTrovate.includes('Tipo 2')) preseTrovate.push('Tipo 2');
+    } else if (k.startsWith('socket:type3')) {
+      if (v !== 'no' && !preseTrovate.includes('Tipo 3A')) preseTrovate.push('Tipo 3A');
+    } else if (k.startsWith('socket:schuko')) {
+      if (v !== 'no' && !preseTrovate.includes('Schuko')) preseTrovate.push('Schuko');
     }
-  }
-  result.push(current.trim());
-  return result;
-}
 
-function formattaGestore(raw) {
-  if (!raw) return 'Colonnina Pubblica EV';
-  const pulito = raw.replace(/^["']|["']$/g, '').trim();
-  if (!pulito || pulito.toLowerCase() === 'nd' || pulito.toLowerCase() === 'n/d') {
-    return 'Colonnina Pubblica EV';
-  }
-  const lower = pulito.toLowerCase();
-  if (lower.includes('enel')) return 'Enel X Way';
-  if (lower.includes('be charge') || lower.includes('becharge') || lower.includes('plenitude')) {
-    return 'Plenitude / Be Charge';
-  }
-  if (lower.includes('ewiva')) return 'Ewiva';
-  if (lower.includes('free to x') || lower.includes('freetox')) return 'Free To X';
-  if (lower.includes('ionity')) return 'IONITY';
-  if (lower.includes('tesla')) return 'Tesla Supercharger';
-  if (lower.includes('neogy')) return 'Neogy';
-  if (lower.includes('a2a')) return 'A2A E-Moving';
-  if (lower.includes('duferco')) return 'Duferco Energia';
-  if (lower.includes('atlante')) return 'Atlante';
-  if (lower.includes('hera')) return 'Hera Comm';
-  if (lower.includes('iren')) return 'IrenGO';
-  if (lower.includes('acea')) return 'Acea Energia';
-  if (lower.includes('repower')) return 'Repower';
-  if (lower.includes('sorgenia')) return 'Sorgenia';
-
-  return pulito
-    .toLowerCase()
-    .split(' ')
-    .map((w) => (w.length > 2 ? w.charAt(0).toUpperCase() + w.slice(1) : w.toUpperCase()))
-    .join(' ');
-}
-
-function formattaPresa(rawPresa, potenzaKw) {
-  const p = (rawPresa || '').toLowerCase();
-  if (p.includes('ccs') || p.includes('combo')) return 'CCS Combo 2';
-  if (p.includes('chademo')) return 'CHAdeMO';
-  if (p.includes('type 2') || p.includes('tipo 2') || p.includes('mennekes') || p.includes('t2')) {
-    return 'Tipo 2';
-  }
-  if (p.includes('type 3') || p.includes('tipo 3') || p.includes('scame')) return 'Tipo 3A';
-  if (p.includes('schuko')) return 'Schuko';
-
-  if (potenzaKw >= 50) return 'CCS Combo 2';
-  return 'Tipo 2';
-}
-
-function stimaPrezzoKwh(gestore, potenzaKw, prezzoCsv) {
-  if (prezzoCsv && !isNaN(prezzoCsv) && prezzoCsv > 0) {
-    return Number(prezzoCsv.toFixed(2));
-  }
-  const g = gestore.toLowerCase();
-  if (g.includes('tesla')) return potenzaKw >= 50 ? 0.49 : 0.42;
-  if (potenzaKw >= 100) return 0.79;
-  if (potenzaKw >= 50) return 0.69;
-  return 0.58;
-}
-
-async function caricaDatiColonnine() {
-  const ora = Date.now();
-  if (cacheColonnine.length > 0 && ora - ultimoAggiornamento < CACHE_TTL_MS) {
-    return cacheColonnine;
-  }
-
-  console.log('Scaricamento dataset colonnine EV da:', PUN_CSV_URL);
-  const response = await fetch(PUN_CSV_URL);
-  if (!response.ok) {
-    throw new Error(`Errore download dataset: ${response.status}`);
-  }
-
-  const text = await response.text();
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length < 2) {
-    throw new Error('Dataset CSV vuoto o non valido');
-  }
-
-  // Legge la prima riga (intestazioni)
-  const firstLine = lines.at(0);
-  const separator = firstLine.includes(';') ? ';' : ',';
-  const headers = parseCSVLine(firstLine, separator).map((h) =>
-    h
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/^["'\uFEFF]|["']$/g, '')
-      .trim()
-  );
-
-  console.log('Intestazioni CSV rilevate:', headers);
-
-  const findIdx = (keywords) =>
-    headers.findIndex((h) => keywords.some((kw) => h === kw || h.includes(kw)));
-
-  const idxLat = findIdx(['latitudine', 'latitude', 'lat', 'y']);
-  const idxLng = findIdx(['longitudine', 'longitude', 'lon', 'lng', 'x']);
-  const idxGestore = findIdx([
-    'operatore',
-    'gestore',
-    'cpo',
-    'denominazione',
-    'ragione_sociale',
-    'ragione sociale',
-    'owner',
-    'brand',
-    'nome',
-  ]);
-  const idxIndirizzo = findIdx(['indirizzo', 'address', 'via', 'ubicazione', 'localita', 'location']);
-  const idxComune = findIdx(['comune', 'citta', 'city', 'municipality']);
-  const idxProvincia = findIdx(['provincia', 'province', 'prov']);
-  const idxPotenza = findIdx(['potenza', 'power', 'kw', 'max_power', 'potenza_kw', 'potenza massima']);
-  const idxPresa = findIdx([
-    'presa',
-    'connettore',
-    'connector',
-    'tipo_presa',
-    'tipo presa',
-    'tipologia presa',
-    'socket',
-    'standard',
-  ]);
-  const idxPrezzo = findIdx(['prezzo', 'tariffa', 'price', 'costo']);
-  const idxData = findIdx(['data', 'aggiornamento', 'updated', 'date']);
-
-  const oggi = new Date().toLocaleDateString('it-IT');
-  const parsed = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const cols = parseCSVLine(lines.at(i), separator);
-    if (cols.length < 3) continue;
-
-    const lat = parseFloat((cols.at(idxLat) || '').replace(',', '.'));
-    const lng = parseFloat((cols.at(idxLng) || '').replace(',', '.'));
-    if (isNaN(lat) || isNaN(lng) || lat === 0 || lng === 0) continue;
-
-    const gestore = formattaGestore(idxGestore !== -1 ? cols.at(idxGestore) : '');
-    const via = idxIndirizzo !== -1 ? cols.at(idxIndirizzo) : '';
-    const comune = idxComune !== -1 ? cols.at(idxComune) : '';
-    const prov = idxProvincia !== -1 ? cols.at(idxProvincia) : '';
-
-    let indirizzoCompleto = [via, comune, prov ? `(${prov})` : '']
-      .filter((p) => p && p.trim().length > 0)
-      .join(', ')
-      .replace(', (', ' (');
-    if (!indirizzoCompleto) indirizzoCompleto = 'Indirizzo non disponibile';
-
-    let potenzaKw = 22;
-    if (idxPotenza !== -1 && cols.at(idxPotenza)) {
-      const pVal = parseFloat(cols.at(idxPotenza).replace(',', '.').replace(/[^\d.]/g, ''));
-      if (!isNaN(pVal) && pVal > 0) {
-        potenzaKw = pVal > 1000 ? Math.round(pVal / 1000) : Math.round(pVal);
+    // Estrazione potenza in kW
+    if (k.includes(':output') || k === 'maxpower' || k === 'power') {
+      const match = v.match(/(\d+(?:[.,]\d+)?)/);
+      const primoNumero = match ? match.at(1) : null;
+      if (primoNumero) {
+        let val = parseFloat(primoNumero.replace(',', '.'));
+        if (v.includes('w') && !v.includes('kw') && val > 1000) {
+          val = val / 1000;
+        }
+        if (!isNaN(val) && val > maxKw) {
+          maxKw = Math.round(val);
+        }
       }
     }
-
-    const tipoPresa = formattaPresa(idxPresa !== -1 ? cols.at(idxPresa) : '', potenzaKw);
-    const categoriaRicarica = potenzaKw >= 50 ? 'Fast DC' : 'Ricarica AC';
-    const tipoRicarica = `${tipoPresa} • ${potenzaKw} kW`;
-
-    const prezzoRaw = idxPrezzo !== -1 ? parseFloat((cols.at(idxPrezzo) || '').replace(',', '.')) : NaN;
-    const prezzo = stimaPrezzoKwh(gestore, potenzaKw, prezzoRaw);
-
-    const dataAgg = idxData !== -1 && cols.at(idxData) ? cols.at(idxData) : oggi;
-
-    parsed.push({
-      gestore,
-      prezzo,
-      latitudine: lat,
-      longitudine: lng,
-      indirizzo: indirizzoCompleto,
-      self: potenzaKw >= 50,
-      data: dataAgg,
-      potenzaKw,
-      tipoPresa,
-      categoriaRicarica,
-      tipoRicarica,
-    });
   }
 
-  cacheColonnine = parsed;
-  ultimoAggiornamento = ora;
-  console.log(`Caricate ${cacheColonnine.length} colonnine in cache.`);
-  return cacheColonnine;
+  // Valori di default realistici se i tag OSM non li specificano
+  if (maxKw === 0) maxKw = 22;
+  const tipoPresa =
+    preseTrovate.length > 0
+      ? preseTrovate.join(' / ')
+      : maxKw >= 43
+      ? 'CCS Combo 2'
+      : 'Tipo 2';
+
+  return { potenzaKw: maxKw, tipoPresa };
 }
 
-async function gestisciRicercaColonnine(req, res) {
+function risolviTariffa(tags, isFastDc) {
+  const candidati = [
+    tags.operator,
+    tags.brand,
+    tags.network,
+    tags.name,
+    tags.description,
+    tags['operator:wikidata'],
+    tags['brand:wikidata'],
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  const lower = candidati.toLowerCase();
+
+  for (const op of LISTINO_OPERATORI) {
+    if (op.keywords.some((kw) => lower.includes(kw))) {
+      return {
+        gestore: op.nomeUfficiale,
+        prezzo: isFastDc ? op.dc : op.ac,
+      };
+    }
+  }
+
+  const nomePulito = tags.operator || tags.brand || tags.network || tags.name || '';
+  return {
+    gestore: nomePulito.trim() || 'Colonnina Pubblica EV',
+    prezzo: isFastDc ? 0.74 : 0.62,
+  };
+}
+
+function formattaIndirizzo(tags, lat, lon) {
+  const via = tags['addr:street'] || tags['street'] || '';
+  const civico = tags['addr:housenumber'] || '';
+  const citta = tags['addr:city'] || tags['addr:town'] || tags['addr:village'] || '';
+  const luogo = tags['name'] || '';
+
+  const strada = [via, civico].filter(Boolean).join(' ');
+  const parti = [strada, citta].filter(Boolean);
+
+  if (parti.length > 0) return parti.join(', ');
+  if (luogo) return luogo;
+  return `Posizione GPS (${lat.toFixed(4)}, ${lon.toFixed(4)})`;
+}
+
+app.get('/', (_req, res) => {
+  res.json({ status: 'ok', message: 'API Colonnine EV Italia attiva' });
+});
+
+app.get('/api/colonnine', async (req, res) => {
   try {
     const lat = parseFloat(req.query.lat);
-    const lng = parseFloat(req.query.lng);
-    const raggio = parseFloat(req.query.raggio) || 10;
+    const lng = parseFloat(req.query.lng || req.query.lon);
+    const raggioKm = Math.min(Math.max(parseFloat(req.query.raggio || req.query.radius || '10') || 10, 1), 30);
 
     if (isNaN(lat) || isNaN(lng)) {
       return res.status(400).json({ error: 'Parametri lat e lng obbligatori' });
     }
 
-    const tutte = await caricaDatiColonnine();
+    const raggioMetri = Math.round(raggioKm * 1000);
+    const overpassQuery = `
+      [out:json][timeout:15];
+      (
+        node["amenity"="charging_station"](around:${raggioMetri},${lat},${lng});
+        way["amenity"="charging_station"](around:${raggioMetri},${lat},${lng});
+      );
+      out center tags;
+    `;
 
-    const vicine = tutte
-      .map((c) => {
-        const dist = calcolaDistanzaKm(lat, lng, c.latitudine, c.longitudine);
+    const response = await fetch('https://overpass-api.de', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `data=${encodeURIComponent(overpassQuery)}`,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Errore Overpass API: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const elements = data.elements || [];
+
+    const oggi = new Date().toLocaleDateString('it-IT', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+
+    const colonnine = elements
+      .map((el) => {
+        const cLat = el.lat ?? el.center?.lat;
+        const cLon = el.lon ?? el.center?.lon;
+        if (typeof cLat !== 'number' || typeof cLon !== 'number') return null;
+
+        const tags = el.tags || {};
+        if (tags.access === 'private') return null;
+
+        const { potenzaKw, tipoPresa } = estraiPotenzaEPresa(tags);
+        const isFastDc = potenzaKw >= 43;
+        const { gestore, prezzo } = risolviTariffa(tags, isFastDc);
+        const distKm = calcolaDistanzaKm(lat, lng, cLat, cLon);
+
         return {
-          ...c,
-          distanza: Number(dist.toFixed(1)),
+          gestore,
+          prezzo,
+          latitudine: cLat,
+          longitudine: cLon,
+          indirizzo: formattaIndirizzo(tags, cLat, cLon),
+          distanza: distKm.toFixed(1),
+          self: !isFastDc,
+          data: oggi,
+          potenzaKw,
+          tipoPresa,
+          tipoRicarica: `${tipoPresa} • ${potenzaKw} kW`,
         };
       })
-      .filter((c) => c.distanza <= raggio)
-      .sort((a, b) => a.prezzo - b.prezzo || a.distanza - b.distanza)
-      .slice(0, 30);
+      .filter(Boolean)
+      .sort((a, b) => a.prezzo - b.prezzo || parseFloat(a.distanza) - parseFloat(b.distanza));
 
-    res.json(vicine);
-  } catch (err) {
-    console.error('Errore ricerca colonnine:', err);
-    res.status(500).json({ error: 'Errore interno del server', dettagli: err.message });
-  }
-}
-
-app.get('/', (req, res) => {
-  res.json({
-    status: 'online',
-    servizio: 'Colonnine EV API Italia',
-    colonnineInCache: cacheColonnine.length,
-  });
-});
-
-app.get('/api/colonnine', gestisciRicercaColonnine);
-app.get('/api/distributori', gestisciRicercaColonnine);
-
-app.get('/api/debug-sample', async (req, res) => {
-  try {
-    const tutte = await caricaDatiColonnine();
-    res.json({
-      totale: tutte.length,
-      esempio: tutte.slice(0, 3),
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.json(colonnine);
+  } catch (error) {
+    console.error('Errore /api/colonnine:', error);
+    res.status(500).json({ error: 'Errore durante il recupero delle colonnine' });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server colonnine EV attivo sulla porta ${PORT}`);
+  console.log(`Server colonnine EV in ascolto sulla porta ${PORT}`);
 });
+
 
 
 
