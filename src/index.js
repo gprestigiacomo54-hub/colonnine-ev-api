@@ -285,25 +285,3 @@ details: err.message,
 });
 }
 });
-app.listen(PORT, () => {
-console.log(Server Colonnine EV in ascolto sulla porta ${PORT});
-});
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
