@@ -9,7 +9,8 @@ app.use(express.json());
 const PORT = Number(process.env.PORT) || 3000;
 
 const PUN_CSV_URL =
-  'https://rav.githubusercontent.com';
+ 'https://raw.githubusercontent.com/ondata/rete_ricarica_veicoli_elettrici/main/data/rete_ricarica_veicoli_elettrici.csv';
+
 
 const CODICI_EMIO3 = {
   BEC: { nomeUfficiale: 'Plenitude + Be Charge', ac: 0.65, dc: 0.85 },
