@@ -7,7 +7,7 @@ app.use(express.json());
 
 const PORT = Number(process.env.PORT) || 3000;
 
-const OVERPASS_ENDPOINTS = [
+const OVERPASS_HOSTS = [
   'https://overpass-api.de',
   'https://kumi.systems',
   'https://mail.ru',
@@ -143,16 +143,17 @@ function formattaIndirizzo(tags, lat, lon) {
 async function interrogaOverpassConFallback(overpassQuery) {
   let ultimoErrore = null;
 
-  for (const endpoint of OVERPASS_ENDPOINTS) {
+  for (const host of OVERPASS_HOSTS) {
+    const endpoint = `${host}/api/interpreter`;
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 12000);
+      const timeoutId = setTimeout(() => controller.abort(), 14000);
 
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'ColonnineEVItaliaApp/1.0 (https://onrender.com)',
+          'User-Agent': 'ColonnineEVItaliaApp/1.0',
         },
         body: `data=${encodeURIComponent(overpassQuery)}`,
         signal: controller.signal,
@@ -193,7 +194,7 @@ app.get('/api/colonnine', async (req, res) => {
 
     const raggioMetri = Math.round(raggioKm * 1000);
     const overpassQuery = `
-      [out:json][timeout:12];
+      [out:json][timeout:14];
       (
         node["amenity"="charging_station"](around:${raggioMetri},${lat},${lng});
         way["amenity"="charging_station"](around:${raggioMetri},${lat},${lng});
@@ -253,6 +254,7 @@ app.get('/api/colonnine', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server colonnine EV in ascolto sulla porta ${PORT}`);
 });
+
 
 
 
