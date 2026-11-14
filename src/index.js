@@ -7,6 +7,12 @@ app.use(express.json());
 
 const PORT = Number(process.env.PORT) || 3000;
 
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de',
+  'https://kumi.systems',
+  'https://mail.ru',
+];
+
 const LISTINO_OPERATORI = [
   { keywords: ['tesla'], nomeUfficiale: 'Tesla Supercharger', ac: 0.55, dc: 0.65 },
   { keywords: ['electra'], nomeUfficiale: 'Electra', ac: 0.54, dc: 0.54 },
@@ -49,7 +55,6 @@ function estraiPotenzaEPresa(tags) {
     const k = key.toLowerCase();
     const v = String(value).toLowerCase();
 
-    // Riconoscimento prese dai tag socket:* di OpenStreetMap
     if (k.startsWith('socket:type2_combo') || k.includes('ccs')) {
       if (v !== 'no' && !preseTrovate.includes('CCS Combo 2')) preseTrovate.push('CCS Combo 2');
       if (maxKw < 50) maxKw = 50;
@@ -64,7 +69,6 @@ function estraiPotenzaEPresa(tags) {
       if (v !== 'no' && !preseTrovate.includes('Schuko')) preseTrovate.push('Schuko');
     }
 
-    // Estrazione potenza in kW
     if (k.includes(':output') || k === 'maxpower' || k === 'power') {
       const match = v.match(/(\d+(?:[.,]\d+)?)/);
       const primoNumero = match ? match.at(1) : null;
@@ -80,7 +84,6 @@ function estraiPotenzaEPresa(tags) {
     }
   }
 
-  // Valori di default realistici se i tag OSM non li specificano
   if (maxKw === 0) maxKw = 22;
   const tipoPresa =
     preseTrovate.length > 0
@@ -137,6 +140,43 @@ function formattaIndirizzo(tags, lat, lon) {
   return `Posizione GPS (${lat.toFixed(4)}, ${lon.toFixed(4)})`;
 }
 
+async function interrogaOverpassConFallback(overpassQuery) {
+  let ultimoErrore = null;
+
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'ColonnineEVItaliaApp/1.0 (https://onrender.com)',
+        },
+        body: `data=${encodeURIComponent(overpassQuery)}`,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        ultimoErrore = `HTTP ${response.status} da ${endpoint}`;
+        continue;
+      }
+
+      const data = await response.json();
+      if (data && Array.isArray(data.elements)) {
+        return data.elements;
+      }
+    } catch (err) {
+      ultimoErrore = `${endpoint}: ${err.message}`;
+    }
+  }
+
+  throw new Error(ultimoErrore || 'Tutti i server Overpass sono momentaneamente occupati');
+}
+
 app.get('/', (_req, res) => {
   res.json({ status: 'ok', message: 'API Colonnine EV Italia attiva' });
 });
@@ -153,7 +193,7 @@ app.get('/api/colonnine', async (req, res) => {
 
     const raggioMetri = Math.round(raggioKm * 1000);
     const overpassQuery = `
-      [out:json][timeout:15];
+      [out:json][timeout:12];
       (
         node["amenity"="charging_station"](around:${raggioMetri},${lat},${lng});
         way["amenity"="charging_station"](around:${raggioMetri},${lat},${lng});
@@ -161,18 +201,7 @@ app.get('/api/colonnine', async (req, res) => {
       out center tags;
     `;
 
-    const response = await fetch('https://overpass-api.de', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `data=${encodeURIComponent(overpassQuery)}`,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Errore Overpass API: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const elements = data.elements || [];
+    const elements = await interrogaOverpassConFallback(overpassQuery);
 
     const oggi = new Date().toLocaleDateString('it-IT', {
       day: '2-digit',
@@ -214,13 +243,17 @@ app.get('/api/colonnine', async (req, res) => {
     res.json(colonnine);
   } catch (error) {
     console.error('Errore /api/colonnine:', error);
-    res.status(500).json({ error: 'Errore durante il recupero delle colonnine' });
+    res.status(500).json({
+      error: 'Errore durante il recupero delle colonnine',
+      dettagli: error.message,
+    });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`Server colonnine EV in ascolto sulla porta ${PORT}`);
 });
+
 
 
 
