@@ -14,7 +14,6 @@ let cacheColonnine = [];
 let ultimoAggiornamento = 0;
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 ore
 
-// Calcolo distanza in km (Formula di Haversine)
 function calcolaDistanzaKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -29,7 +28,6 @@ function calcolaDistanzaKm(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// Parser CSV robusto (gestisce sia ';' che ',' e campi tra virgolette)
 function parseCSVLine(line, separator) {
   const result = [];
   let current = '';
@@ -49,7 +47,6 @@ function parseCSVLine(line, separator) {
   return result;
 }
 
-// Pulizia e normalizzazione del nome del gestore (CPO)
 function formattaGestore(raw) {
   if (!raw) return 'Colonnina Pubblica EV';
   const pulito = raw.replace(/^["']|["']$/g, '').trim();
@@ -82,7 +79,6 @@ function formattaGestore(raw) {
     .join(' ');
 }
 
-// Normalizzazione tipo presa / connettore
 function formattaPresa(rawPresa, potenzaKw) {
   const p = (rawPresa || '').toLowerCase();
   if (p.includes('ccs') || p.includes('combo')) return 'CCS Combo 2';
@@ -97,16 +93,15 @@ function formattaPresa(rawPresa, potenzaKw) {
   return 'Tipo 2';
 }
 
-// Stima prezzo medio €/kWh in base alla potenza e all'operatore
 function stimaPrezzoKwh(gestore, potenzaKw, prezzoCsv) {
   if (prezzoCsv && !isNaN(prezzoCsv) && prezzoCsv > 0) {
     return Number(prezzoCsv.toFixed(2));
   }
   const g = gestore.toLowerCase();
   if (g.includes('tesla')) return potenzaKw >= 50 ? 0.49 : 0.42;
-  if (potenzaKw >= 100) return 0.79; // Ultra-Fast DC
-  if (potenzaKw >= 50) return 0.69;  // Fast DC
-  return 0.58;                       // Standard AC
+  if (potenzaKw >= 100) return 0.79;
+  if (potenzaKw >= 50) return 0.69;
+  return 0.58;
 }
 
 async function caricaDatiColonnine() {
@@ -127,9 +122,11 @@ async function caricaDatiColonnine() {
     throw new Error('Dataset CSV vuoto o non valido');
   }
 
-  const separator = lines[0].includes(';') ? ';' : ',';
-  const headers = parseCSVLine(lines[0], separator).map((h) =>
-    h.toLowerCase().replace(/^["']|["']$/g, '')
+  // Rileva il separatore dalla PRIMA riga (intestazioni)
+  const firstLine = lines[0];
+  const separator = firstLine.includes(';') ? ';' : ',';
+  const headers = parseCSVLine(firstLine, separator).map((h) =>
+    h.toLowerCase().replace(/^["'\uFEFF]|["']$/g, '').trim()
   );
 
   console.log('Intestazioni CSV rilevate:', headers);
@@ -282,6 +279,7 @@ app.get('/api/debug-sample', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server colonnine EV attivo sulla porta ${PORT}`);
 });
+
 
 
 
