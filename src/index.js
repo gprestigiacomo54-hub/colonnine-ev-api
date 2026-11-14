@@ -122,11 +122,16 @@ async function caricaDatiColonnine() {
     throw new Error('Dataset CSV vuoto o non valido');
   }
 
-  // Rileva il separatore dalla PRIMA riga (intestazioni)
-  const firstLine = lines[0];
+  // Legge la prima riga (intestazioni)
+  const firstLine = lines.at(0);
   const separator = firstLine.includes(';') ? ';' : ',';
   const headers = parseCSVLine(firstLine, separator).map((h) =>
-    h.toLowerCase().replace(/^["'\uFEFF]|["']$/g, '').trim()
+    h
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/^["'\uFEFF]|["']$/g, '')
+      .trim()
   );
 
   console.log('Intestazioni CSV rilevate:', headers);
@@ -142,6 +147,7 @@ async function caricaDatiColonnine() {
     'cpo',
     'denominazione',
     'ragione_sociale',
+    'ragione sociale',
     'owner',
     'brand',
     'nome',
@@ -149,13 +155,14 @@ async function caricaDatiColonnine() {
   const idxIndirizzo = findIdx(['indirizzo', 'address', 'via', 'ubicazione', 'localita', 'location']);
   const idxComune = findIdx(['comune', 'citta', 'city', 'municipality']);
   const idxProvincia = findIdx(['provincia', 'province', 'prov']);
-  const idxPotenza = findIdx(['potenza', 'power', 'kw', 'max_power', 'potenza_kw', 'potenza_massima']);
+  const idxPotenza = findIdx(['potenza', 'power', 'kw', 'max_power', 'potenza_kw', 'potenza massima']);
   const idxPresa = findIdx([
     'presa',
     'connettore',
     'connector',
     'tipo_presa',
-    'tipologia_presa',
+    'tipo presa',
+    'tipologia presa',
     'socket',
     'standard',
   ]);
@@ -166,17 +173,17 @@ async function caricaDatiColonnine() {
   const parsed = [];
 
   for (let i = 1; i < lines.length; i++) {
-    const cols = parseCSVLine(lines[i], separator);
+    const cols = parseCSVLine(lines.at(i), separator);
     if (cols.length < 3) continue;
 
-    const lat = parseFloat((cols[idxLat] || '').replace(',', '.'));
-    const lng = parseFloat((cols[idxLng] || '').replace(',', '.'));
+    const lat = parseFloat((cols.at(idxLat) || '').replace(',', '.'));
+    const lng = parseFloat((cols.at(idxLng) || '').replace(',', '.'));
     if (isNaN(lat) || isNaN(lng) || lat === 0 || lng === 0) continue;
 
-    const gestore = formattaGestore(idxGestore !== -1 ? cols[idxGestore] : '');
-    const via = idxIndirizzo !== -1 ? cols[idxIndirizzo] : '';
-    const comune = idxComune !== -1 ? cols[idxComune] : '';
-    const prov = idxProvincia !== -1 ? cols[idxProvincia] : '';
+    const gestore = formattaGestore(idxGestore !== -1 ? cols.at(idxGestore) : '');
+    const via = idxIndirizzo !== -1 ? cols.at(idxIndirizzo) : '';
+    const comune = idxComune !== -1 ? cols.at(idxComune) : '';
+    const prov = idxProvincia !== -1 ? cols.at(idxProvincia) : '';
 
     let indirizzoCompleto = [via, comune, prov ? `(${prov})` : '']
       .filter((p) => p && p.trim().length > 0)
@@ -185,21 +192,21 @@ async function caricaDatiColonnine() {
     if (!indirizzoCompleto) indirizzoCompleto = 'Indirizzo non disponibile';
 
     let potenzaKw = 22;
-    if (idxPotenza !== -1 && cols[idxPotenza]) {
-      const pVal = parseFloat(cols[idxPotenza].replace(',', '.').replace(/[^\d.]/g, ''));
+    if (idxPotenza !== -1 && cols.at(idxPotenza)) {
+      const pVal = parseFloat(cols.at(idxPotenza).replace(',', '.').replace(/[^\d.]/g, ''));
       if (!isNaN(pVal) && pVal > 0) {
         potenzaKw = pVal > 1000 ? Math.round(pVal / 1000) : Math.round(pVal);
       }
     }
 
-    const tipoPresa = formattaPresa(idxPresa !== -1 ? cols[idxPresa] : '', potenzaKw);
+    const tipoPresa = formattaPresa(idxPresa !== -1 ? cols.at(idxPresa) : '', potenzaKw);
     const categoriaRicarica = potenzaKw >= 50 ? 'Fast DC' : 'Ricarica AC';
     const tipoRicarica = `${tipoPresa} • ${potenzaKw} kW`;
 
-    const prezzoRaw = idxPrezzo !== -1 ? parseFloat((cols[idxPrezzo] || '').replace(',', '.')) : NaN;
+    const prezzoRaw = idxPrezzo !== -1 ? parseFloat((cols.at(idxPrezzo) || '').replace(',', '.')) : NaN;
     const prezzo = stimaPrezzoKwh(gestore, potenzaKw, prezzoRaw);
 
-    const dataAgg = idxData !== -1 && cols[idxData] ? cols[idxData] : oggi;
+    const dataAgg = idxData !== -1 && cols.at(idxData) ? cols.at(idxData) : oggi;
 
     parsed.push({
       gestore,
@@ -279,6 +286,7 @@ app.get('/api/debug-sample', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server colonnine EV attivo sulla porta ${PORT}`);
 });
+
 
 
 
