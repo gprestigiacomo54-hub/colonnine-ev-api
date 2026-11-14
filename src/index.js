@@ -10,7 +10,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const OVERPASS_HOSTS = [
   'https://overpass-api.de',
   'https://kumi.systems',
-  'https://mail.ru',
+  'https://mail.ru' + '/osm/tools/overpass',
 ];
 
 const LISTINO_OPERATORI = [
@@ -147,7 +147,7 @@ async function interrogaOverpassConFallback(overpassQuery) {
     const endpoint = `${host}/api/interpreter`;
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 14000);
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
 
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -192,12 +192,19 @@ app.get('/api/colonnine', async (req, res) => {
       return res.status(400).json({ error: 'Parametri lat e lng obbligatori' });
     }
 
-    const raggioMetri = Math.round(raggioKm * 1000);
+    // Calcolo riquadro geografico (bbox) per query istantanea su Overpass
+    const deltaLat = raggioKm / 111.32;
+    const deltaLng = raggioKm / (111.32 * Math.cos((lat * Math.PI) / 180));
+    const minLat = (lat - deltaLat).toFixed(5);
+    const maxLat = (lat + deltaLat).toFixed(5);
+    const minLng = (lng - deltaLng).toFixed(5);
+    const maxLng = (lng + deltaLng).toFixed(5);
+
     const overpassQuery = `
-      [out:json][timeout:14];
+      [out:json][timeout:18][bbox:${minLat},${minLng},${maxLat},${maxLng}];
       (
-        node["amenity"="charging_station"](around:${raggioMetri},${lat},${lng});
-        way["amenity"="charging_station"](around:${raggioMetri},${lat},${lng});
+        node["amenity"="charging_station"];
+        way["amenity"="charging_station"];
       );
       out center tags;
     `;
@@ -219,10 +226,12 @@ app.get('/api/colonnine', async (req, res) => {
         const tags = el.tags || {};
         if (tags.access === 'private') return null;
 
+        const distKm = calcolaDistanzaKm(lat, lng, cLat, cLon);
+        if (distKm > raggioKm) return null;
+
         const { potenzaKw, tipoPresa } = estraiPotenzaEPresa(tags);
         const isFastDc = potenzaKw >= 43;
         const { gestore, prezzo } = risolviTariffa(tags, isFastDc);
-        const distKm = calcolaDistanzaKm(lat, lng, cLat, cLon);
 
         return {
           gestore,
@@ -254,6 +263,7 @@ app.get('/api/colonnine', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server colonnine EV in ascolto sulla porta ${PORT}`);
 });
+
 
 
 
