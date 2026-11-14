@@ -7,6 +7,12 @@ app.use(express.json());
 
 const PORT = Number(process.env.PORT) || 3000;
 
+const OVERPASS_MIRRORS = [
+  'https://overpass-api.de',
+  'https://kumi.systems',
+  'https://mail.ru',
+];
+
 const LISTINO_OPERATORI = [
   { keywords: ['tesla'], nomeUfficiale: 'Tesla Supercharger', ac: 0.55, dc: 0.65 },
   { keywords: ['electra'], nomeUfficiale: 'Electra', ac: 0.54, dc: 0.54 },
@@ -89,6 +95,33 @@ function formattaIndirizzo(tags, lat, lon) {
   return `Posizione GPS (${lat.toFixed(4)}, ${lon.toFixed(4)})`;
 }
 
+async function interrogaOverpass(query) {
+  for (const url of OVERPASS_MIRRORS) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'ColonnineEVItaliaApp/1.0 (https://onrender.com)',
+        },
+        body: `data=${encodeURIComponent(query)}`,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        return await response.json();
+      }
+      console.warn(`Mirror ${url} ha risposto con status ${response.status}`);
+    } catch (err) {
+      console.warn(`Mirror ${url} fallito:`, err.message);
+    }
+  }
+  throw new Error('Tutti i server Overpass sono momentaneamente non raggiungibili');
+}
+
 app.get('/', (_req, res) => {
   res.json({ status: 'ok', message: 'API Colonnine EV Italia attiva' });
 });
@@ -104,26 +137,9 @@ app.get('/api/colonnine', async (req, res) => {
     }
 
     const raggioMetri = Math.round(raggioKm * 1000);
-    const overpassQuery = `
-      [out:json][timeout:15];
-      (
-        node["amenity"="charging_station"](around:${raggioMetri},${lat},${lng});
-        way["amenity"="charging_station"](around:${raggioMetri},${lat},${lng});
-      );
-      out center tags;
-    `;
+    const overpassQuery = `[out:json][timeout:15];(node["amenity"="charging_station"](around:${raggioMetri},${lat},${lng});way["amenity"="charging_station"](around:${raggioMetri},${lat},${lng}););out center tags;`;
 
-    const response = await fetch('https://overpass-api.de', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `data=${encodeURIComponent(overpassQuery)}`,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Errore Overpass API: ${response.status}`);
-    }
-
-    const data = await response.json();
+    const data = await interrogaOverpass(overpassQuery);
     const elements = data.elements || [];
 
     const oggi = new Date().toLocaleDateString('it-IT', {
@@ -166,7 +182,7 @@ app.get('/api/colonnine', async (req, res) => {
     res.json(colonnine);
   } catch (error) {
     console.error('Errore /api/colonnine:', error);
-    res.status(500).json({ error: 'Errore durante il recupero delle colonnine' });
+    res.status(500).json({ error: error.message || 'Errore durante il recupero delle colonnine' });
   }
 });
 
