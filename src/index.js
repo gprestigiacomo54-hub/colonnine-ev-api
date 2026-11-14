@@ -7,8 +7,9 @@ app.use(express.json());
 
 const PORT = Number(process.env.PORT) || 3000;
 
-const PUN_CSV_URL =
-  'https://githubusercontent.com';
+// Endpoint ufficiale Piattaforma Unica Nazionale (PUN - MASE/GSE)
+const PUN_ARCGIS_URL =
+  'https://arcgis.com';
 
 const LISTINO_OPERATORI = [
   { keywords: ['tesla'], nomeUfficiale: 'Tesla Supercharger', ac: 0.55, dc: 0.65 },
@@ -28,10 +29,6 @@ const LISTINO_OPERATORI = [
   { keywords: ['ace', 'acea'], nomeUfficiale: 'Acea Energia', ac: 0.65, dc: 0.83 },
 ];
 
-let cacheColonnine = [];
-let ultimoAggiornamentoCache = 0;
-const DURATA_CACHE_MS = 24 * 60 * 60 * 1000;
-
 function calcolaDistanzaKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -47,7 +44,7 @@ function calcolaDistanzaKm(lat1, lon1, lat2, lon2) {
 }
 
 function risolviTariffa(rawOperator, isFastDc) {
-  const lower = rawOperator.toLowerCase();
+  const lower = String(rawOperator || '').toLowerCase();
   for (const op of LISTINO_OPERATORI) {
     if (op.keywords.some((kw) => lower.includes(kw))) {
       return {
@@ -62,112 +59,8 @@ function risolviTariffa(rawOperator, isFastDc) {
   };
 }
 
-function parseCsvLine(line, sep) {
-  const result = [];
-  let cur = '';
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') {
-        cur += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (ch === sep && !inQuotes) {
-      result.push(cur.trim());
-      cur = '';
-    } else {
-      cur += ch;
-    }
-  }
-  result.push(cur.trim());
-  return result;
-}
-
-async function caricaDatasetPun() {
-  const ora = Date.now();
-  if (cacheColonnine.length > 0 && ora - ultimoAggiornamentoCache < DURATA_CACHE_MS) {
-    return cacheColonnine;
-  }
-
-  const response = await fetch(PUN_CSV_URL);
-  if (!response.ok) {
-    throw new Error(`Errore download dataset PUN: ${response.status}`);
-  }
-
-  const csvText = await response.text();
-  const lines = csvText.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length < 2) {
-    throw new Error('Dataset PUN vuoto');
-  }
-
-  const headerLine = lines[0];
-  const sep = headerLine.split(';').length > headerLine.split(',').length ? ';' : ',';
-  const headers = parseCsvLine(headerLine, sep).map((h) => h.toLowerCase().replace(/[^a-z0-9_]/g, ''));
-
-  const idxLat = headers.findIndex((h) => h === 'lat' || h === 'latitude' || h === 'latitudine' || h === 'y');
-  const idxLon = headers.findIndex((h) => h === 'lon' || h === 'lng' || h === 'longitude' || h === 'longitudine' || h === 'x');
-  const idxCpo = headers.findIndex((h) => h.includes('cpo') || h.includes('gestore') || h.includes('operatore') || h.includes('owner') || h.includes('brand') || h.includes('denominazione'));
-  const idxAddr = headers.findIndex((h) => h.includes('indirizzo') || h.includes('address') || h.includes('via') || h.includes('ubicazione'));
-  const idxCity = headers.findIndex((h) => h.includes('comune') || h.includes('city') || h.includes('citta') || h.includes('localita'));
-  const idxPower = headers.findIndex((h) => h.includes('potenza') || h.includes('power') || h.includes('kw') || h.includes('tipologia') || h.includes('tipo'));
-
-  const parsed = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const cols = parseCsvLine(lines[i], sep);
-    const lat = parseFloat((cols[idxLat] || '').replace(',', '.'));
-    const lon = parseFloat((cols[idxLon] || '').replace(',', '.'));
-    if (isNaN(lat) || isNaN(lon) || lat < 35 || lat > 48 || lon < 6 || lon > 19) continue;
-
-    const rawCpo = (idxCpo >= 0 ? cols[idxCpo] : '') || 'Colonnina Pubblica EV';
-    const rawAddr = idxAddr >= 0 ? cols[idxAddr] : '';
-    const rawCity = idxCity >= 0 ? cols[idxCity] : '';
-    const rawPower = idxPower >= 0 ? cols[idxPower] : '';
-
-    let potenzaKw = 22;
-    const matchKw = String(rawPower).match(/(\d+(?:[.,]\d+)?)/);
-    if (matchKw && matchKw[1]) {
-      const val = parseFloat(matchKw[1].replace(',', '.'));
-      if (!isNaN(val) && val > 0) {
-        potenzaKw = val > 1000 ? Math.round(val / 1000) : val;
-      }
-    }
-    if (String(rawPower).toLowerCase().includes('fast') || String(rawPower).toLowerCase().includes('hpc') || String(rawPower).toLowerCase().includes('dc')) {
-      if (potenzaKw < 50) potenzaKw = 50;
-    }
-
-    const isFastDc = potenzaKw >= 43;
-    const { gestore, prezzo } = risolviTariffa(rawCpo, isFastDc);
-
-    const indirizzo = [rawAddr, rawCity].filter(Boolean).join(', ') || `Posizione GPS (${lat.toFixed(4)}, ${lon.toFixed(4)})`;
-
-    parsed.push({
-      gestore,
-      prezzo,
-      latitudine: lat,
-      longitudine: lon,
-      indirizzo,
-      self: !isFastDc,
-      potenzaKw,
-      tipoRicarica: isFastDc ? `Fast DC (${potenzaKw} kW)` : `Quick AC (${potenzaKw} kW)`,
-    });
-  }
-
-  cacheColonnine = parsed;
-  ultimoAggiornamentoCache = ora;
-  console.log(`Dataset PUN caricato in memoria: ${parsed.length} colonnine`);
-  return cacheColonnine;
-}
-
 app.get('/', (_req, res) => {
-  res.json({
-    status: 'ok',
-    message: 'API Colonnine EV Italia (Dataset PUN) attiva',
-    colonnineInCache: cacheColonnine.length,
-  });
+  res.json({ status: 'ok', message: 'API Colonnine EV Italia (PUN Nazionale) attiva' });
 });
 
 app.get('/api/colonnine', async (req, res) => {
@@ -180,7 +73,33 @@ app.get('/api/colonnine', async (req, res) => {
       return res.status(400).json({ error: 'Parametri lat e lng obbligatori' });
     }
 
-    const tutteLeColonnine = await caricaDatasetPun();
+    // Calcolo bounding box geografico intorno all'utente
+    const deltaLat = raggioKm / 111.0;
+    const deltaLon = raggioKm / (111.0 * Math.cos((lat * Math.PI) / 180));
+    const minLat = lat - deltaLat;
+    const maxLat = lat + deltaLat;
+    const minLon = lng - deltaLon;
+    const maxLon = lng + deltaLon;
+
+    const params = new URLSearchParams({
+      where: '1=1',
+      geometry: `${minLon},${minLat},${maxLon},${maxLat}`,
+      geometryType: 'esriGeometryEnvelope',
+      inSR: '4326',
+      spatialRel: 'esriSpatialRelIntersects',
+      outFields: '*',
+      returnGeometry: 'true',
+      outSR: '4326',
+      f: 'json',
+    });
+
+    const response = await fetch(`${PUN_ARCGIS_URL}?${params.toString()}`);
+    if (!response.ok) {
+      throw new Error(`Errore servizio PUN: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const features = data.features || [];
 
     const oggi = new Date().toLocaleDateString('it-IT', {
       day: '2-digit',
@@ -189,18 +108,69 @@ app.get('/api/colonnine', async (req, res) => {
     });
 
     const risultati = [];
-    for (const col of tutteLeColonnine) {
-      // Filtro rapido approssimato prima di Haversine per massima velocità
-      if (Math.abs(col.latitudine - lat) > 0.6 || Math.abs(col.longitudine - lng) > 0.8) continue;
 
-      const distKm = calcolaDistanzaKm(lat, lng, col.latitudine, col.longitudine);
-      if (distKm <= raggioKm) {
-        risultati.push({
-          ...col,
-          distanza: distKm.toFixed(1),
-          data: oggi,
-        });
+    for (const f of features) {
+      const attrs = f.attributes || {};
+      const geom = f.geometry || {};
+
+      const cLat = typeof geom.y === 'number' ? geom.y : parseFloat(attrs.latitudine || attrs.lat || attrs.Y);
+      const cLon = typeof geom.x === 'number' ? geom.x : parseFloat(attrs.longitudine || attrs.lon || attrs.X);
+
+      if (isNaN(cLat) || isNaN(cLon)) continue;
+
+      const distKm = calcolaDistanzaKm(lat, lng, cLat, cLon);
+      if (distKm > raggioKm) continue;
+
+      const rawCpo =
+        attrs.cpo ||
+        attrs.gestore ||
+        attrs.operatore ||
+        attrs.denominazione ||
+        attrs.CPO ||
+        attrs.GESTORE ||
+        'Colonnina Pubblica EV';
+
+      const rawPower =
+        attrs.potenza_max ||
+        attrs.potenza ||
+        attrs.POTENZA ||
+        attrs.tipologia ||
+        attrs.TIPOLOGIA ||
+        '';
+
+      let potenzaKw = 22;
+      const matchKw = String(rawPower).match(/(\d+(?:[.,]\d+)?)/);
+      const numStr = matchKw ? matchKw.at(1) : null;
+      if (numStr) {
+        const val = parseFloat(numStr.replace(',', '.'));
+        if (!isNaN(val) && val > 0) {
+          potenzaKw = val > 1000 ? Math.round(val / 1000) : val;
+        }
       }
+      if (String(rawPower).toLowerCase().includes('fast') || String(rawPower).toLowerCase().includes('hpc')) {
+        if (potenzaKw < 50) potenzaKw = 50;
+      }
+
+      const isFastDc = potenzaKw >= 43;
+      const { gestore, prezzo } = risolviTariffa(rawCpo, isFastDc);
+
+      const via = attrs.indirizzo || attrs.INDIRIZZO || attrs.via || '';
+      const comune = attrs.comune || attrs.COMUNE || attrs.citta || '';
+      const indirizzo =
+        [via, comune].filter(Boolean).join(', ') || `Posizione GPS (${cLat.toFixed(4)}, ${cLon.toFixed(4)})`;
+
+      risultati.push({
+        gestore,
+        prezzo,
+        latitudine: cLat,
+        longitudine: cLon,
+        indirizzo,
+        distanza: distKm.toFixed(1),
+        self: !isFastDc,
+        data: oggi,
+        potenzaKw,
+        tipoRicarica: isFastDc ? `Fast DC (${potenzaKw} kW)` : `Quick AC (${potenzaKw} kW)`,
+      });
     }
 
     risultati.sort((a, b) => a.prezzo - b.prezzo || parseFloat(a.distanza) - parseFloat(b.distanza));
@@ -213,7 +183,7 @@ app.get('/api/colonnine', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server colonnine EV in ascolto sulla porta ${PORT}`);
-  caricaDatasetPun().catch((err) => console.error('Precaricamento PUN fallito:', err.message));
+  console.log(`Server colonnine EV (PUN) in ascolto sulla porta ${PORT}`);
 });
+
 
