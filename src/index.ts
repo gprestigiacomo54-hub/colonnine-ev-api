@@ -5,7 +5,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 interface ColonninaRisposta {
   gestore: string;
@@ -20,7 +20,6 @@ interface ColonninaRisposta {
   tipoRicarica?: string;
 }
 
-// Listino tariffe Pay-Per-Use Italia (aggiornato Autunno 2026 - €/kWh)
 const LISTINO_OPERATORI: Array<{
   keywords: string[];
   nomeUfficiale: string;
@@ -44,7 +43,6 @@ const LISTINO_OPERATORI: Array<{
   { keywords: ['ace', 'acea'], nomeUfficiale: 'Acea Energia', ac: 0.65, dc: 0.83 },
 ];
 
-// Calcolo distanza in km (formula di Haversine)
 function calcolaDistanzaKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -59,13 +57,12 @@ function calcolaDistanzaKm(lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * c;
 }
 
-// Estrae la potenza massima in kW dai tag OpenStreetMap
 function estraiPotenzaKw(tags: Record<string, string>): number {
-  let maxKw = 22; // Default AC standard in Italia
+  let maxKw = 22;
   for (const [key, value] of Object.entries(tags)) {
     if (key.includes(':output') || key === 'maxpower' || key === 'power') {
-      const match = value.match(/(\d+(?:[.,]\d+)?)/);
-      if (match) {
+      const match = String(value).match(/(\d+(?:[.,]\d+)?)/);
+      if (match && match[1]) {
         const val = parseFloat(match[1].replace(',', '.'));
         if (!isNaN(val) && val > maxKw) {
           maxKw = val;
@@ -79,7 +76,6 @@ function estraiPotenzaKw(tags: Record<string, string>): number {
   return maxKw;
 }
 
-// Associa operatore e tariffa
 function risolviTariffa(rawOperator: string, isFastDc: boolean): { gestore: string; prezzo: number } {
   const lower = rawOperator.toLowerCase();
   for (const op of LISTINO_OPERATORI) {
@@ -92,11 +88,10 @@ function risolviTariffa(rawOperator: string, isFastDc: boolean): { gestore: stri
   }
   return {
     gestore: rawOperator || 'Colonnina Pubblica EV',
-    prezzo: isFastDc ? 0.74 : 0.62, // Media nazionale Italia
+    prezzo: isFastDc ? 0.74 : 0.62,
   };
 }
 
-// Formatta l'indirizzo dai tag OSM
 function formattaIndirizzo(tags: Record<string, string>, lat: number, lon: number): string {
   const via = tags['addr:street'] || tags['street'] || '';
   const civico = tags['addr:housenumber'] || '';
@@ -119,7 +114,6 @@ app.get('/api/colonnine', async (req: Request, res: Response) => {
   try {
     const lat = parseFloat(req.query.lat as string);
     const lng = parseFloat((req.query.lng || req.query.lon) as string);
-    // Raggio in km (default 10 km, massimo 30 km per velocità)
     const raggioKm = Math.min(Math.max(parseFloat((req.query.raggio || req.query.radius || '10') as string) || 10, 1), 30);
 
     if (isNaN(lat) || isNaN(lng)) {
@@ -163,7 +157,6 @@ app.get('/api/colonnine', async (req: Request, res: Response) => {
         if (typeof cLat !== 'number' || typeof cLon !== 'number') return null;
 
         const tags: Record<string, string> = el.tags || {};
-        // Esclude stazioni chiaramente private
         if (tags.access === 'private') return null;
 
         const rawOperator = tags.operator || tags.brand || tags.network || tags.name || '';
@@ -179,7 +172,7 @@ app.get('/api/colonnine', async (req: Request, res: Response) => {
           longitudine: cLon,
           indirizzo: formattaIndirizzo(tags, cLat, cLon),
           distanza: distKm.toFixed(1),
-          self: !isFastDc, // true = AC (fino a 22kW), false = Fast/HPC DC
+          self: !isFastDc,
           data: oggi,
           potenzaKw,
           tipoRicarica: isFastDc ? `Fast DC (${potenzaKw} kW)` : `Quick AC (${potenzaKw} kW)`,
