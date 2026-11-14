@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const https = require('https');
 
 const app = express();
 app.use(cors());
@@ -8,8 +9,7 @@ app.use(express.json());
 const PORT = Number(process.env.PORT) || 3000;
 
 const PUN_CSV_URL =
-  'https://githubusercontent.com' +
-  '/ondata/rete_ricarica_veicoli_elettrici/main/data/rete_ricarica_veicoli_elettrici.csv';
+  'https://raw.githubusercontent.com/ondata/rete_ricarica_veicoli_elettrici/main/data/rete_ricarica_veicoli_elettrici.csv';
 
 const LISTINO_OPERATORI = [
   { keywords: ['tesla'], nomeUfficiale: 'Tesla Supercharger', ac: 0.55, dc: 0.65 },
@@ -27,13 +27,30 @@ const LISTINO_OPERATORI = [
   { keywords: ['hera'], nomeUfficiale: 'Hera Comm', ac: 0.66, dc: 0.84 },
   { keywords: ['iren'], nomeUfficiale: 'IrenGO', ac: 0.65, dc: 0.82 },
   { keywords: ['ace', 'acea'], nomeUfficiale: 'Acea Energia', ac: 0.65, dc: 0.83 },
-  { keywords: ['repower'], nomeUfficiale: 'Repower', ac: 0.68, dc: 0.82 },
-  { keywords: ['sorgenia'], nomeUfficiale: 'Sorgenia', ac: 0.66, dc: 0.80 },
 ];
 
 let cacheColonnine = [];
-let ultimoAggiornamento = 0;
-const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+let ultimoAggiornamentoCache = 0;
+const DURATA_CACHE_MS = 24 * 60 * 60 * 1000;
+
+function scaricaTestoHttps(url) {
+  return new Promise((resolve, reject) => {
+    https
+      .get(url, { family: 4, headers: { 'User-Agent': 'ColonnineEVItaliaApp/1.0' } }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          return resolve(scaricaTestoHttps(res.headers.location));
+        }
+        if (res.statusCode !== 200) {
+          return reject(new Error(`HTTP status ${res.statusCode}`));
+        }
+        let data = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => resolve(data));
+      })
+      .on('error', reject);
+  });
+}
 
 function calcolaDistanzaKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
@@ -49,29 +66,8 @@ function calcolaDistanzaKm(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-function parseCSVLine(line, separator) {
-  const result = [];
-  let current = '';
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const char = line.charAt(i);
-    if (char === '"') {
-      inQuotes = !inQuotes;
-    } else if (char === separator && !inQuotes) {
-      result.push(current.trim());
-      current = '';
-    } else {
-      current += char;
-    }
-  }
-  result.push(current.trim());
-  return result;
-}
-
-function risolviOperatoreETariffa(rawOperator, isFastDc) {
-  const pulito = (rawOperator || '').replace(/^["']|["']$/g, '').trim();
-  const lower = pulito.toLowerCase();
-
+function risolviTariffa(rawOperator, isFastDc) {
+  const lower = String(rawOperator || '').toLowerCase();
   for (const op of LISTINO_OPERATORI) {
     if (op.keywords.some((kw) => lower.includes(kw))) {
       return {
@@ -80,152 +76,113 @@ function risolviOperatoreETariffa(rawOperator, isFastDc) {
       };
     }
   }
-
   return {
-    gestore: pulito && lower !== 'nd' && lower !== 'n/d' ? pulito : 'Colonnina Pubblica EV',
+    gestore: rawOperator || 'Colonnina Pubblica EV',
     prezzo: isFastDc ? 0.74 : 0.62,
   };
 }
 
-function formattaPresa(rawPresa, potenzaKw) {
-  const p = (rawPresa || '').toLowerCase();
-  if (p.includes('ccs') || p.includes('combo')) return 'CCS Combo 2';
-  if (p.includes('chademo')) return 'CHAdeMO';
-  if (p.includes('type 2') || p.includes('tipo 2') || p.includes('mennekes') || p.includes('t2')) {
-    return 'Tipo 2';
+function parseCsvLine(line, sep) {
+  const result = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line.at(i);
+    if (ch === '"') {
+      if (inQuotes && line.at(i + 1) === '"') {
+        cur += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === sep && !inQuotes) {
+      result.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
   }
-  if (p.includes('type 3') || p.includes('tipo 3') || p.includes('scame')) return 'Tipo 3A';
-  if (p.includes('schuko')) return 'Schuko';
-
-  return potenzaKw >= 43 ? 'CCS Combo 2' : 'Tipo 2';
+  result.push(cur.trim());
+  return result;
 }
 
-async function caricaDatasetInCache() {
+async function caricaDatasetPun() {
   const ora = Date.now();
-  if (cacheColonnine.length > 0 && ora - ultimoAggiornamento < CACHE_TTL_MS) {
+  if (cacheColonnine.length > 0 && ora - ultimoAggiornamentoCache < DURATA_CACHE_MS) {
     return cacheColonnine;
   }
 
-  const response = await fetch(PUN_CSV_URL, {
-    headers: { 'User-Agent': 'ColonnineEVItaliaApp/1.0' },
-  });
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} scaricando il dataset PUN`);
-  }
-
-  const text = await response.text();
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  const csvText = await scaricaTestoHttps(PUN_CSV_URL);
+  const lines = csvText.split(/\r?\n/).filter((l) => l.trim().length > 0);
   if (lines.length < 2) {
-    throw new Error('Dataset CSV vuoto');
+    throw new Error('Dataset PUN vuoto');
   }
 
-  const firstLine = lines.at(0);
-  const separator = firstLine.includes(';') ? ';' : ',';
-  const headers = parseCSVLine(firstLine, separator).map((h) =>
-    h
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/^["'\uFEFF]|["']$/g, '')
-      .trim()
-  );
+  const headerLine = lines.at(0);
+  const sep = headerLine.split(';').length > headerLine.split(',').length ? ';' : ',';
+  const headers = parseCsvLine(headerLine, sep).map((h) => h.toLowerCase().replace(/[^a-z0-9_]/g, ''));
 
-  const findIdx = (keywords) =>
-    headers.findIndex((h) => keywords.some((kw) => h === kw || h.includes(kw)));
-
-  const idxLat = findIdx(['latitudine', 'latitude', 'lat', 'y']);
-  const idxLng = findIdx(['longitudine', 'longitude', 'lon', 'lng', 'x']);
-  const idxGestore = findIdx([
-    'operatore',
-    'gestore',
-    'cpo',
-    'denominazione',
-    'ragione_sociale',
-    'ragione sociale',
-    'owner',
-    'brand',
-    'nome',
-  ]);
-  const idxIndirizzo = findIdx(['indirizzo', 'address', 'via', 'ubicazione', 'localita', 'location']);
-  const idxComune = findIdx(['comune', 'citta', 'city', 'municipality']);
-  const idxProvincia = findIdx(['provincia', 'province', 'prov']);
-  const idxPotenza = findIdx(['potenza', 'power', 'kw', 'max_power', 'potenza_kw', 'potenza massima']);
-  const idxPresa = findIdx([
-    'presa',
-    'connettore',
-    'connector',
-    'tipo_presa',
-    'tipo presa',
-    'tipologia presa',
-    'socket',
-    'standard',
-  ]);
-
-  const oggi = new Date().toLocaleDateString('it-IT', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-  });
+  const idxLat = headers.findIndex((h) => h === 'lat' || h === 'latitude' || h === 'latitudine' || h === 'y');
+  const idxLon = headers.findIndex((h) => h === 'lon' || h === 'lng' || h === 'longitude' || h === 'longitudine' || h === 'x');
+  const idxCpo = headers.findIndex((h) => h.includes('cpo') || h.includes('gestore') || h.includes('operatore') || h.includes('owner') || h.includes('brand') || h.includes('denominazione'));
+  const idxAddr = headers.findIndex((h) => h.includes('indirizzo') || h.includes('address') || h.includes('via') || h.includes('ubicazione'));
+  const idxCity = headers.findIndex((h) => h.includes('comune') || h.includes('city') || h.includes('citta') || h.includes('localita'));
+  const idxPower = headers.findIndex((h) => h.includes('potenza') || h.includes('power') || h.includes('kw') || h.includes('tipologia') || h.includes('tipo'));
 
   const parsed = [];
 
   for (let i = 1; i < lines.length; i++) {
-    const cols = parseCSVLine(lines.at(i), separator);
-    if (cols.length < 3) continue;
-
+    const cols = parseCsvLine(lines.at(i), sep);
     const lat = parseFloat((cols.at(idxLat) || '').replace(',', '.'));
-    const lng = parseFloat((cols.at(idxLng) || '').replace(',', '.'));
-    if (isNaN(lat) || isNaN(lng) || lat === 0 || lng === 0) continue;
+    const lon = parseFloat((cols.at(idxLon) || '').replace(',', '.'));
+    if (isNaN(lat) || isNaN(lon) || lat < 35 || lat > 48 || lon < 6 || lon > 19) continue;
+
+    const rawCpo = (idxCpo >= 0 ? cols.at(idxCpo) : '') || 'Colonnina Pubblica EV';
+    const rawAddr = idxAddr >= 0 ? cols.at(idxAddr) : '';
+    const rawCity = idxCity >= 0 ? cols.at(idxCity) : '';
+    const rawPower = idxPower >= 0 ? cols.at(idxPower) : '';
 
     let potenzaKw = 22;
-    if (idxPotenza !== -1 && cols.at(idxPotenza)) {
-      const pVal = parseFloat(cols.at(idxPotenza).replace(',', '.').replace(/[^\d.]/g, ''));
-      if (!isNaN(pVal) && pVal > 0) {
-        potenzaKw = pVal > 1000 ? Math.round(pVal / 1000) : Math.round(pVal);
+    const matchKw = String(rawPower).match(/(\d+(?:[.,]\d+)?)/);
+    const numStr = matchKw ? matchKw.at(1) : null;
+    if (numStr) {
+      const val = parseFloat(numStr.replace(',', '.'));
+      if (!isNaN(val) && val > 0) {
+        potenzaKw = val > 1000 ? Math.round(val / 1000) : val;
       }
+    }
+    if (String(rawPower).toLowerCase().includes('fast') || String(rawPower).toLowerCase().includes('hpc') || String(rawPower).toLowerCase().includes('dc')) {
+      if (potenzaKw < 50) potenzaKw = 50;
     }
 
     const isFastDc = potenzaKw >= 43;
-    const rawGestore = idxGestore !== -1 ? cols.at(idxGestore) : '';
-    const { gestore, prezzo } = risolviOperatoreETariffa(rawGestore, isFastDc);
-    const tipoPresa = formattaPresa(idxPresa !== -1 ? cols.at(idxPresa) : '', potenzaKw);
+    const { gestore, prezzo } = risolviTariffa(rawCpo, isFastDc);
 
-    const via = idxIndirizzo !== -1 ? cols.at(idxIndirizzo) : '';
-    const comune = idxComune !== -1 ? cols.at(idxComune) : '';
-    const prov = idxProvincia !== -1 ? cols.at(idxProvincia) : '';
-
-    const indirizzo =
-      [via, comune, prov ? `(${prov})` : '']
-        .filter((p) => p && p.trim().length > 0)
-        .join(', ')
-        .replace(', (', ' (') || `Posizione GPS (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
+    const indirizzo = [rawAddr, rawCity].filter(Boolean).join(', ') || `Posizione GPS (${lat.toFixed(4)}, ${lon.toFixed(4)})`;
 
     parsed.push({
       gestore,
       prezzo,
       latitudine: lat,
-      longitudine: lng,
+      longitudine: lon,
       indirizzo,
       self: !isFastDc,
-      data: oggi,
       potenzaKw,
-      tipoPresa,
-      tipoRicarica: `${tipoPresa} • ${potenzaKw} kW`,
+      tipoRicarica: isFastDc ? `Fast DC (${potenzaKw} kW)` : `Quick AC (${potenzaKw} kW)`,
     });
   }
 
   cacheColonnine = parsed;
-  ultimoAggiornamento = ora;
-  console.log(`Cache aggiornata: ${cacheColonnine.length} colonnine caricate.`);
+  ultimoAggiornamentoCache = ora;
+  console.log(`Dataset PUN caricato in memoria: ${parsed.length} colonnine`);
   return cacheColonnine;
 }
 
 app.get('/', (_req, res) => {
   res.json({
     status: 'ok',
-    message: 'API Colonnine EV Italia attiva (Cache PUN)',
-    totaleInCache: cacheColonnine.length,
+    message: 'API Colonnine EV Italia (PUN Nazionale) attiva',
+    colonnineInCache: cacheColonnine.length,
   });
 });
 
@@ -233,42 +190,50 @@ app.get('/api/colonnine', async (req, res) => {
   try {
     const lat = parseFloat(req.query.lat);
     const lng = parseFloat(req.query.lng || req.query.lon);
-    const raggioKm = Math.min(
-      Math.max(parseFloat(req.query.raggio || req.query.radius || '10') || 10, 1),
-      50
-    );
+    const raggioKm = Math.min(Math.max(parseFloat(req.query.raggio || req.query.radius || '10') || 10, 1), 50);
 
     if (isNaN(lat) || isNaN(lng)) {
       return res.status(400).json({ error: 'Parametri lat e lng obbligatori' });
     }
 
-    const tutte = await caricaDatasetInCache();
+    const tutteLeColonnine = await caricaDatasetPun();
 
-    const colonnine = tutte
-      .map((c) => {
-        const distKm = calcolaDistanzaKm(lat, lng, c.latitudine, c.longitudine);
-        return {
-          ...c,
+    const oggi = new Date().toLocaleDateString('it-IT', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+
+    const risultati = [];
+    for (const col of tutteLeColonnine) {
+      if (Math.abs(col.latitudine - lat) > 0.6 || Math.abs(col.longitudine - lng) > 0.8) continue;
+
+      const distKm = calcolaDistanzaKm(lat, lng, col.latitudine, col.longitudine);
+      if (distKm <= raggioKm) {
+        risultati.push({
+          ...col,
           distanza: distKm.toFixed(1),
-        };
-      })
-      .filter((c) => parseFloat(c.distanza) <= raggioKm)
-      .sort((a, b) => a.prezzo - b.prezzo || parseFloat(a.distanza) - parseFloat(b.distanza))
-      .slice(0, 40);
+          data: oggi,
+        });
+      }
+    }
 
-    res.json(colonnine);
+    risultati.sort((a, b) => a.prezzo - b.prezzo || parseFloat(a.distanza) - parseFloat(b.distanza));
+
+    res.json(risultati.slice(0, 100));
   } catch (error) {
     console.error('Errore /api/colonnine:', error);
-    res.status(500).json({
-      error: 'Errore durante il recupero delle colonnine',
-      dettagli: error.message,
-    });
+    res.status(500).json({ error: error.message || 'Errore durante il recupero delle colonnine' });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`Server colonnine EV in ascolto sulla porta ${PORT}`);
+  caricaDatasetPun().catch((err) => console.error('Precaricamento PUN fallito:', err.message));
 });
+
+
+
 
 
 
