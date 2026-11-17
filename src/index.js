@@ -9,8 +9,7 @@ app.use(express.json());
 const PORT = Number(process.env.PORT) || 3000;
 
 const PUN_CSV_URL =
- 'https://raw.githubusercontent.com/ondata/rete_ricarica_veicoli_elettrici/main/data/rete_ricarica_veicoli_elettrici.csv';
-
+  'https://raw.githubusercontent.com/ondata/rete_ricarica_veicoli_elettrici/main/data/rete_ricarica_veicoli_elettrici.csv';
 
 const CODICI_EMIO3 = {
   BEC: { nomeUfficiale: 'Plenitude + Be Charge', ac: 0.65, dc: 0.85 },
@@ -32,11 +31,16 @@ const CODICI_EMIO3 = {
   REP: { nomeUfficiale: 'Repower', ac: 0.68, dc: 0.82 },
   PWI: { nomeUfficiale: 'Powy', ac: 0.65, dc: 0.80 },
   GAS: { nomeUfficiale: 'GasGas', ac: 0.65, dc: 0.79 },
+  UAT: { nomeUfficiale: 'Uattzy', ac: 0.60, dc: 0.75 },
+  UTZ: { nomeUfficiale: 'Uattzy', ac: 0.60, dc: 0.75 },
 };
 
 let cacheColonnine = [];
 let ultimoAggiornamentoCache = 0;
 const DURATA_CACHE_MS = 24 * 60 * 60 * 1000;
+
+const cacheOsmZone = new Map();
+const DURATA_CACHE_OSM_MS = 6 * 60 * 60 * 1000;
 
 function scaricaTestoHttps(url) {
   return new Promise((resolve, reject) => {
@@ -57,6 +61,42 @@ function scaricaTestoHttps(url) {
   });
 }
 
+function postOverpassHttps(query) {
+  return new Promise((resolve, reject) => {
+    const postData = 'data=' + encodeURIComponent(query);
+    const options = {
+      hostname: 'overpass-api.de',
+      path: '/api/interpreter',
+      method: 'POST',
+      family: 4,
+      timeout: 8000,
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(postData),
+        'User-Agent': 'ColonnineEVItaliaApp/1.0',
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      if (res.statusCode !== 200) {
+        return reject(new Error('Overpass HTTP ' + res.statusCode));
+      }
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => resolve(data));
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Overpass timeout'));
+    });
+    req.on('error', reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
 function calcolaDistanzaKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -69,6 +109,22 @@ function calcolaDistanzaKm(lat1, lon1, lat2, lon2) {
       Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+}
+
+function stimaTariffaDaNome(nomeGestore, isFastDc) {
+  const upper = String(nomeGestore || '').toUpperCase();
+  if (upper.includes('UATTZY')) return isFastDc ? 0.75 : 0.60;
+  if (upper.includes('ENEL')) return isFastDc ? 0.75 : 0.67;
+  if (upper.includes('PLENITUDE') || upper.includes('BE CHARGE')) return isFastDc ? 0.85 : 0.65;
+  if (upper.includes('EWIVA')) return isFastDc ? 0.80 : 0.75;
+  if (upper.includes('A2A')) return isFastDc ? 0.90 : 0.65;
+  if (upper.includes('DUFERCO')) return isFastDc ? 0.79 : 0.74;
+  if (upper.includes('ELECTRA')) return 0.54;
+  if (upper.includes('IONITY')) return 0.85;
+  if (upper.includes('ATLANTE')) return isFastDc ? 0.85 : 0.69;
+  if (upper.includes('TESLA')) return isFastDc ? 0.65 : 0.55;
+  if (upper.includes('POWY')) return isFastDc ? 0.80 : 0.65;
+  return isFastDc ? 0.74 : 0.62;
 }
 
 function risolviOperatoreETariffa(evseId, nomeLocation, isFastDc) {
@@ -87,9 +143,10 @@ function risolviOperatoreETariffa(evseId, nomeLocation, isFastDc) {
   const loc = String(nomeLocation || '').trim();
   const idxDash = loc.indexOf(' - ');
   const nomePulito = idxDash > 0 ? loc.substring(0, idxDash).trim() : loc;
+  const gestoreFinale = nomePulito || 'Colonnina Pubblica EV';
   return {
-    gestore: nomePulito || 'Colonnina Pubblica EV',
-    prezzo: isFastDc ? 0.74 : 0.62,
+    gestore: gestoreFinale,
+    prezzo: stimaTariffaDaNome(gestoreFinale, isFastDc),
   };
 }
 
@@ -238,10 +295,98 @@ async function caricaDatasetPun() {
   return cacheColonnine;
 }
 
+async function cercaColonnineOsm(lat, lng, raggioKm) {
+  const key = lat.toFixed(2) + '_' + lng.toFixed(2) + '_' + Math.ceil(raggioKm);
+  const ora = Date.now();
+  const cached = cacheOsmZone.get(key);
+  if (cached && ora - cached.timestamp < DURATA_CACHE_OSM_MS) {
+    return cached.data;
+  }
+
+  const raggioMetri = Math.round(raggioKm * 1000);
+  const overpassQuery = `[out:json][timeout:8];(node["amenity"="charging_station"](around:${raggioMetri},${lat},${lng});way["amenity"="charging_station"](around:${raggioMetri},${lat},${lng}););out center tags;`;
+
+  try {
+    const rawJson = await postOverpassHttps(overpassQuery);
+    const parsed = JSON.parse(rawJson);
+    const elements = Array.isArray(parsed.elements) ? parsed.elements : [];
+
+    const stazioniOsm = [];
+    for (const el of elements) {
+      const elLat = el.lat !== undefined ? el.lat : el.center && el.center.lat;
+      const elLon = el.lon !== undefined ? el.lon : el.center && el.center.lon;
+      if (typeof elLat !== 'number' || typeof elLon !== 'number') continue;
+
+      const tags = el.tags || {};
+      const gestore =
+        tags.operator ||
+        tags.network ||
+        tags.brand ||
+        tags.name ||
+        'Colonnina Pubblica EV';
+
+      let potenzaKw = 22;
+      const outputStr =
+        tags['socket:type2_combo:output'] ||
+        tags['socket:type2:output'] ||
+        tags.output ||
+        tags.power ||
+        '';
+      const matchKw = String(outputStr).match(/(\d+(?:[.,]\d+)?)/);
+      if (matchKw) {
+        const val = parseFloat(matchKw.at(1).replace(',', '.'));
+        if (!isNaN(val) && val > 0) {
+          potenzaKw = val >= 1000 ? Math.round(val / 1000) : Math.round(val);
+        }
+      }
+
+      const preseList = [];
+      if (tags['socket:type2_combo']) preseList.push('CCS2 Combo');
+      if (tags['socket:type2']) preseList.push('Tipo 2');
+      if (tags['socket:chademo']) preseList.push('CHAdeMO');
+      if (tags['socket:type3a']) preseList.push('Tipo 3A');
+      if (tags['socket:schuko']) preseList.push('Schuko');
+      if (preseList.length === 0) preseList.push('Tipo 2');
+
+      const isFastDc = potenzaKw >= 43 || preseList.includes('CCS2 Combo');
+      const preseStr = preseList.join(', ');
+      const via = [tags['addr:street'], tags['addr:housenumber']].filter(Boolean).join(' ');
+      const citta = tags['addr:city'] || tags['addr:town'] || tags['addr:village'] || '';
+      const indirizzo =
+        [via, citta].filter(Boolean).join(', ') ||
+        tags.description ||
+        'Posizione GPS (' + elLat.toFixed(4) + ', ' + elLon.toFixed(4) + ')';
+
+      stazioniOsm.push({
+        gestore: gestore,
+        prezzo: stimaTariffaDaNome(gestore, isFastDc),
+        latitudine: elLat,
+        longitudine: elLon,
+        indirizzo: indirizzo,
+        self: !isFastDc,
+        potenzaKw: potenzaKw,
+        prese: preseStr,
+        tipoRicarica:
+          (isFastDc ? 'Fast DC' : 'Ricarica AC') +
+          ' (' +
+          potenzaKw +
+          ' kW) • ' +
+          preseStr,
+      });
+    }
+
+    cacheOsmZone.set(key, { timestamp: ora, data: stazioniOsm });
+    return stazioniOsm;
+  } catch (err) {
+    console.warn('Fallback solo PUN (Overpass non disponibile):', err.message);
+    return [];
+  }
+}
+
 app.get('/', (_req, res) => {
   res.json({
     status: 'ok',
-    message: 'API Colonnine EV Italia (PUN Nazionale) attiva',
+    message: 'API Colonnine EV Italia (PUN + OpenStreetMap) attiva',
     colonnineInCache: cacheColonnine.length,
   });
 });
@@ -256,7 +401,10 @@ app.get('/api/colonnine', async (req, res) => {
       return res.status(400).json({ error: 'Parametri lat e lng obbligatori' });
     }
 
-    const tutteLeColonnine = await caricaDatasetPun();
+    const [tutteLeColonninePun, colonnineOsm] = await Promise.all([
+      caricaDatasetPun(),
+      cercaColonnineOsm(lat, lng, raggioKm),
+    ]);
 
     const oggi = new Date().toLocaleDateString('it-IT', {
       day: '2-digit',
@@ -265,8 +413,9 @@ app.get('/api/colonnine', async (req, res) => {
     });
 
     const risultati = [];
-    for (let i = 0; i < tutteLeColonnine.length; i++) {
-      const col = tutteLeColonnine.at(i);
+
+    for (let i = 0; i < tutteLeColonninePun.length; i++) {
+      const col = tutteLeColonninePun.at(i);
       if (Math.abs(col.latitudine - lat) > 0.6 || Math.abs(col.longitudine - lng) > 0.8) continue;
 
       const distKm = calcolaDistanzaKm(lat, lng, col.latitudine, col.longitudine);
@@ -281,6 +430,31 @@ app.get('/api/colonnine', async (req, res) => {
           potenzaKw: col.potenzaKw,
           prese: col.prese,
           tipoRicarica: col.tipoRicarica,
+          distanza: distKm.toFixed(1),
+          data: oggi,
+        });
+      }
+    }
+
+    for (const osmCol of colonnineOsm) {
+      const distKm = calcolaDistanzaKm(lat, lng, osmCol.latitudine, osmCol.longitudine);
+      if (distKm > raggioKm) continue;
+
+      const giaPresente = risultati.some(
+        (r) => calcolaDistanzaKm(r.latitudine, r.longitudine, osmCol.latitudine, osmCol.longitudine) < 0.06
+      );
+
+      if (!giaPresente) {
+        risultati.push({
+          gestore: osmCol.gestore,
+          prezzo: osmCol.prezzo,
+          latitudine: osmCol.latitudine,
+          longitudine: osmCol.longitudine,
+          indirizzo: osmCol.indirizzo,
+          self: osmCol.self,
+          potenzaKw: osmCol.potenzaKw,
+          prese: osmCol.prese,
+          tipoRicarica: osmCol.tipoRicarica,
           distanza: distKm.toFixed(1),
           data: oggi,
         });
